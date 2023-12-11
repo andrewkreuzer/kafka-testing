@@ -1,0 +1,4 @@
+/target
+.direnv
+eventhub.consumer.properties
+eventhub.producer.properties
