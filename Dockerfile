@@ -2,7 +2,9 @@ FROM rust:latest as build
 
 WORKDIR /app
 
-COPY . .
+COPY ./src ./src
+COPY Cargo.toml .
+COPY Cargo.lock .
 
 RUN apt-get update \
   && apt-get install -y libsasl2-dev
@@ -20,5 +22,8 @@ RUN apt-get update \
 
 COPY --from=build /app/target/release/kt .
 
+COPY ./producer.properties .
+COPY ./consumer.properties .
+
 ENTRYPOINT ["./kt"]
-CMD [ "--producer", "--consumer", "-d", "1s" ]
+CMD [ "--producer", "--consumer", "-d", "500ms" ]

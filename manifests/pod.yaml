@@ -1,0 +1,20 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "kafka-testing"
+  namespace: test
+  labels:
+    app: "kafka-testing"
+spec:
+  containers:
+  - name: kafka-testing
+    image: "kafka-testing:0.3.0"
+    args: [ "--producer", "--consumer", "-d", "200ms" ]
+    resources:
+      limits:
+        cpu: 200m
+        memory: 500Mi
+      requests:
+        cpu: 100m
+        memory: 200Mi

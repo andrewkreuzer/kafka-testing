@@ -1,7 +1,18 @@
 use parse_duration::parse;
-use std::{process::exit, time::Duration};
+use std::{
+    process::exit,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use clap::Parser;
+use signal_hook::consts::signal::*;
+use signal_hook_tokio::Signals;
+
+use futures::stream::StreamExt;
 
 use kafka_testing::{config::Config, consumer, producer};
 
@@ -46,8 +57,14 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+    let signals = Signals::new(&[SIGHUP, SIGTERM, SIGINT, SIGQUIT])?;
+    let handle = signals.handle();
+
+    let recieved = Arc::new(AtomicBool::new(false));
+    let signals_task = tokio::spawn(handle_signals(signals, Arc::clone(&recieved)));
+
     let args = Args::parse();
 
     let config = Config::new(
@@ -76,17 +93,40 @@ async fn main() {
             &args.topic,
             args.looping,
             delay_duration,
+            Arc::clone(&recieved),
         ))
     }
 
     if args.consumer {
         println!("Starting consumer");
-        let consumer_tasks = consumer::run(config.consumer, &args.topic, args.consumer_count);
+        let consumer_tasks = consumer::run(
+            config.consumer,
+            &args.topic,
+            args.consumer_count,
+            Arc::clone(&recieved),
+        );
 
         tasks.extend(consumer_tasks);
     }
 
     for task in tasks {
         let _ = task.await;
+    }
+
+    handle.close();
+    signals_task.await?;
+
+    Ok(())
+}
+
+async fn handle_signals(mut signals: Signals, recieved: Arc<AtomicBool>) {
+    while let Some(signal) = signals.next().await {
+        match signal {
+            SIGTERM | SIGINT | SIGQUIT => {
+                println!("Recieved signal: {}", signal);
+                recieved.store(true, Ordering::Relaxed);
+            }
+            _ => unreachable!(),
+        }
     }
 }
