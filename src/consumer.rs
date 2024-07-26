@@ -1,6 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use log::{info, warn};
 use tokio::task;
 
@@ -36,21 +33,26 @@ pub fn run(
     config: ClientConfig,
     topic: &str,
     count: u8,
-    recieved: Arc<AtomicBool>,
+    kill_channel: tokio::sync::broadcast::Sender<bool>,
 ) -> Vec<task::JoinHandle<()>> {
     (0..count)
         .map(|i| {
-            let recieved = Arc::clone(&recieved);
             let topic = topic.to_owned();
             let config = config.clone();
+            let rx = kill_channel.subscribe();
             task::spawn(async move {
-                consume(&i, &config, &topic, recieved).await;
+                consume(&i, &config, &topic, rx).await;
             })
         })
         .collect()
 }
 
-async fn consume(id: &u8, config: &ClientConfig, topic: &str, recieved: Arc<AtomicBool>) {
+async fn consume(
+    id: &u8,
+    config: &ClientConfig,
+    topic: &str,
+    mut kill_channel: tokio::sync::broadcast::Receiver<bool>,
+) {
     let context = CustomContext;
 
     let consumer: LoggingConsumer = config
@@ -66,30 +68,36 @@ async fn consume(id: &u8, config: &ClientConfig, topic: &str, recieved: Arc<Atom
     let mut none = 0;
     let mut loop_count = 0;
     loop {
-        if recieved.load(Ordering::Relaxed) {
-            info!("consumer: {} recieved signal, shutting down", id);
-            break;
-        }
-        match consumer.recv().await {
-            Err(_) => {
-                errored += 1;
+        tokio::select! {
+            kill = kill_channel.recv() => {
+                if let Ok(_) = kill {
+                    info!("consumer: {} recieved signal, shutting down", id);
+                    break;
+                }
             }
-            Ok(m) => {
-                match m.payload_view::<str>() {
-                    None => {
-                        none += 1;
-                    }
-                    Some(Ok(_)) => {
-                        completed += 1;
-                    }
-                    Some(Err(e)) => {
-                        warn!("Error while deserializing message payload: {:?}", e);
+            msg = consumer.recv() => {
+                match msg {
+                    Err(_) => {
                         errored += 1;
                     }
-                };
-                consumer.commit_message(&m, CommitMode::Async).unwrap();
+                    Ok(m) => {
+                        match m.payload_view::<str>() {
+                            None => {
+                                none += 1;
+                            }
+                            Some(Ok(_)) => {
+                                completed += 1;
+                            }
+                            Some(Err(e)) => {
+                                warn!("Error while deserializing message payload: {:?}", e);
+                                errored += 1;
+                            }
+                        };
+                        consumer.commit_message(&m, CommitMode::Async).unwrap();
+                    }
+                }
             }
-        };
+        }
         if loop_count % 1000 == 0 && completed + errored + none > 0 {
             info!(
                 "consumer: {} completed: {} errored: {} none: {}",

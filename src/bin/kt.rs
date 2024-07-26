@@ -13,6 +13,7 @@ use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
 
 use futures::stream::StreamExt;
+use tokio::sync::broadcast::{channel, Sender};
 
 use kafka_testing::{config::Config, consumer, producer};
 
@@ -62,8 +63,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signals = Signals::new(&[SIGHUP, SIGTERM, SIGINT, SIGQUIT])?;
     let handle = signals.handle();
 
+    let (tx, _) = channel::<bool>(2);
     let recieved = Arc::new(AtomicBool::new(false));
-    let signals_task = tokio::spawn(handle_signals(signals, Arc::clone(&recieved)));
+    let signals_task = tokio::spawn(handle_signals(signals, Arc::clone(&recieved), tx.clone()));
 
     let args = Args::parse();
 
@@ -93,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &args.topic,
             args.looping,
             delay_duration,
-            Arc::clone(&recieved),
+            tx.clone(),
         ))
     }
 
@@ -103,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.consumer,
             &args.topic,
             args.consumer_count,
-            Arc::clone(&recieved),
+            tx.clone(),
         );
 
         tasks.extend(consumer_tasks);
@@ -119,12 +121,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_signals(mut signals: Signals, recieved: Arc<AtomicBool>) {
+async fn handle_signals(mut signals: Signals, recieved: Arc<AtomicBool>, tx: Sender<bool>) {
     while let Some(signal) = signals.next().await {
         match signal {
             SIGTERM | SIGINT | SIGQUIT => {
                 println!("Recieved signal: {}", signal);
                 recieved.store(true, Ordering::Relaxed);
+                let _ = tx.send(true);
             }
             _ => unreachable!(),
         }

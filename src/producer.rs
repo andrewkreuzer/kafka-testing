@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use log::{info, warn};
@@ -14,13 +12,13 @@ pub fn run(
     topic: &str,
     looping: bool,
     delay_duration: Duration,
-    received: Arc<AtomicBool>,
+    kill_channel: tokio::sync::broadcast::Sender<bool>,
 ) -> task::JoinHandle<()> {
-    let received = Arc::clone(&received);
     let topic = topic.to_owned();
     let config = config.clone();
+    let rx = kill_channel.subscribe();
     task::spawn(async move {
-        produce(config, &topic, looping, delay_duration, received).await;
+        produce(config, &topic, looping, delay_duration, rx).await;
     })
 }
 
@@ -29,7 +27,7 @@ pub async fn produce(
     topic_name: &str,
     looping: bool,
     delay_duration: Duration,
-    received: Arc<AtomicBool>,
+    mut kill_channel: tokio::sync::broadcast::Receiver<bool>,
 ) {
     let producer: &FutureProducer = &config.create().expect("Producer creation error");
     let deliver = |i: i32| async move {
@@ -53,21 +51,28 @@ pub async fn produce(
     let mut errored = 0;
     loop {
         let futures = (0..100).map(|i| deliver(i)).collect::<Vec<_>>();
+        let futures = futures::future::join_all(futures);
 
-        if received.load(Ordering::Relaxed) {
-            info!("Received signal to shut down");
-            break;
-        }
-
-        for future in futures {
-            match future.await {
-                Ok(_) => completed += 1,
-                Err(e) => {
-                    warn!("{}", e.0);
-                    errored += 1
+        tokio::select! {
+            kill = kill_channel.recv() => {
+                if let Ok(_) = kill {
+                    info!("producer recieved signal, shutting down");
+                    break;
+                }
+            }
+            futures = futures => {
+                for future in futures {
+                    match future {
+                        Ok(_) => completed += 1,
+                        Err((kafka_err, _msg)) => {
+                            warn!("{}", kafka_err);
+                            errored += 1
+                        }
+                    }
                 }
             }
         }
+
         if loop_count % 10 == 0 && completed + errored > 0 {
             info!(
                 "loop: {}, completed: {}, errored: {}",
