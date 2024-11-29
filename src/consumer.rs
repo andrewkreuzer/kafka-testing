@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use log::{debug, info, warn, error};
@@ -114,9 +114,9 @@ impl Consumer {
                     }
                     _ = tokio::time::sleep(interval) => {
                         let stats = stats.lock().await;
-                        let completed = stats.completed.swap(0, std::sync::atomic::Ordering::Relaxed);
-                        let errored = stats.errored.swap(0, std::sync::atomic::Ordering::Relaxed);
-                        let none = stats.none.swap(0, std::sync::atomic::Ordering::Relaxed);
+                        let completed = stats.completed.swap(0, Ordering::Release);
+                        let errored = stats.errored.swap(0, Ordering::Release);
+                        let none = stats.none.swap(0, Ordering::Release);
                         let msg_count = completed + errored + none;
                         info!("Msgs/s: {}", msg_count / interval.as_secs());
                         debug!("Completed: {}, Errored: {}, None: {}", completed, errored, none);
