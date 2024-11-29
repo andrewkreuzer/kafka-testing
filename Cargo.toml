@@ -15,3 +15,7 @@ parse_duration = "2.1.1"
 signal-hook-tokio = { version = "0.3.1", features = ["futures-v0_3"] }
 signal-hook = "0.3.17"
 futures = "0.3.30"
+tracing = "0.1.40"
+
+[dependencies.trip]
+git = "https://github.com/andrewkreuzer/trip.git"

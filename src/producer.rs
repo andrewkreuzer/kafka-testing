@@ -1,61 +1,74 @@
 use std::time::Duration;
 
 use log::{info, warn};
+use rdkafka::error::KafkaError;
 use tokio::task;
 
 use rdkafka::config::ClientConfig;
-use rdkafka::message::{Header, OwnedHeaders};
+use rdkafka::message::{Header, OwnedHeaders, OwnedMessage};
 use rdkafka::producer::{FutureProducer, FutureRecord};
+
+use trip::CircuitBreaker;
+use trip::Error as TripError;
 
 pub fn run(
     config: ClientConfig,
-    topic: &str,
-    looping: bool,
+    topic: String,
+    oneshot: bool,
     delay_duration: Duration,
+    message_count: i32,
     kill_channel: tokio::sync::broadcast::Sender<bool>,
 ) -> task::JoinHandle<()> {
-    let topic = topic.to_owned();
+    let topic = topic.clone();
     let config = config.clone();
     let rx = kill_channel.subscribe();
     task::spawn(async move {
-        produce(config, &topic, looping, delay_duration, rx).await;
+        produce(config, &topic, oneshot, delay_duration, message_count, rx).await;
     })
 }
 
 pub async fn produce(
     config: ClientConfig,
-    topic_name: &str,
-    looping: bool,
+    topic: &str,
+    onseshot: bool,
     delay_duration: Duration,
+    message_count: i32,
     mut kill_channel: tokio::sync::broadcast::Receiver<bool>,
 ) {
+    let mut circuit = CircuitBreaker::new(3, Duration::from_secs(3));
+    let message_count = if message_count > 0 {
+        message_count
+    } else {
+        100
+    };
+
     let producer: &FutureProducer = &config.create().expect("Producer creation error");
     let deliver = |i: i32| async move {
-        let delivery_status = producer
+        producer
             .send(
-                FutureRecord::to(topic_name)
+                FutureRecord::to(topic)
                     .payload(&format!("Message {}", i))
-                    .key(&format!("Key {}", i))
+                    .key(&format!("{}", i))
                     .headers(OwnedHeaders::new().insert(Header {
                         key: "header_key",
                         value: Some("header_value"),
                     })),
                 Duration::from_secs(0),
             )
-            .await;
-
-        delivery_status
+            .await
     };
     let mut loop_count = 0;
     let mut completed = 0;
     let mut errored = 0;
     loop {
-        let futures = (0..100).map(|i| deliver(i)).collect::<Vec<_>>();
+        let futures = (0..message_count)
+            .map(|i| circuit.call_async(|_e: &(KafkaError, OwnedMessage)| false, deliver(i), None))
+            .collect::<Vec<_>>();
         let futures = futures::future::join_all(futures);
 
         tokio::select! {
             kill = kill_channel.recv() => {
-                if let Ok(_) = kill {
+                if kill.is_ok() {
                     info!("producer recieved signal, shutting down");
                     break;
                 }
@@ -64,9 +77,12 @@ pub async fn produce(
                 for future in futures {
                     match future {
                         Ok(_) => completed += 1,
-                        Err((kafka_err, _msg)) => {
+                        Err(TripError::Inner((kafka_err, _msg))) => {
                             warn!("{}", kafka_err);
                             errored += 1
+                        }
+                        Err(_) => {
+                            errored += 1;
                         }
                     }
                 }
@@ -82,7 +98,7 @@ pub async fn produce(
 
         loop_count += 1;
 
-        if !looping {
+        if onseshot {
             break;
         }
         tokio::time::sleep(delay_duration).await;

@@ -22,8 +22,8 @@ RUN apt-get update \
 
 COPY --from=build /app/target/release/kt .
 
-COPY ./producer.properties .
-COPY ./consumer.properties .
+COPY ./producer.docker.properties ./producer.properties
+COPY ./consumer.docker.properties ./consumer.properties
 
 ENTRYPOINT ["./kt"]
-CMD [ "--producer", "--consumer", "-d", "500ms" ]
+CMD [ "--producer", "--consumer", "-d", "200ms", "-m", "1", "--consumer-count", "10"]
