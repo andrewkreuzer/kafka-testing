@@ -1,9 +1,5 @@
 use std::{
     process::exit,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
     time::Duration,
 };
 
@@ -94,8 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signals = Signals::new([SIGHUP, SIGTERM, SIGINT, SIGQUIT])?;
     let handle = signals.handle();
     let (tx, _) = channel::<bool>(2);
-    let recieved = Arc::new(AtomicBool::new(false));
-    let signals_task = tokio::spawn(handle_signals(signals, recieved.clone(), tx.clone()));
+    let signals_task = tokio::spawn(handle_signals(signals, tx.clone()));
 
     let config = Config::new(
         args.broker,
@@ -158,12 +153,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_signals(mut signals: Signals, recieved: Arc<AtomicBool>, tx: Sender<bool>) {
+async fn handle_signals(mut signals: Signals, tx: Sender<bool>) {
     while let Some(signal) = signals.next().await {
         match signal {
             SIGTERM | SIGINT | SIGQUIT => {
                 println!("Recieved signal: {}", signal);
-                recieved.store(true, Ordering::Relaxed);
                 let _ = tx.send(true);
             }
             _ => unreachable!(),

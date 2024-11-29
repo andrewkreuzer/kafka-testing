@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use log::{debug, info, warn, error};
@@ -51,7 +52,6 @@ pub struct Consumer {
     buffer_size: usize,
     kill_channel: tokio::sync::broadcast::Sender<bool>,
     stats: Arc<Mutex<Stats>>,
-    stats_tx: tokio::sync::broadcast::Sender<(String, i32)>,
     stats_interval: Duration,
 }
 
@@ -63,7 +63,6 @@ impl Consumer {
         buffer_size: usize,
         kill_channel: tokio::sync::broadcast::Sender<bool>,
     ) -> Self {
-        let (stats_tx, _) = tokio::sync::broadcast::channel(5000);
         let stats = Arc::new(Mutex::new(Stats::new()));
         Self {
             topics,
@@ -73,7 +72,6 @@ impl Consumer {
             buffer_size,
             kill_channel,
             stats,
-            stats_tx: stats_tx.clone(),
             stats_interval: Duration::from_secs(5),
         }
     }
@@ -87,25 +85,24 @@ impl Consumer {
                 let topics = self.topics.clone();
                 let config = self.config.clone();
                 let bf = self.buffer_size;
-                let stats_tx = self.stats_tx.clone();
+                let stats = self.stats.clone();
                 let kill_rx = self.kill_channel.subscribe();
                 task::spawn(async move {
-                    consume(i, config, topics, bf, stats_tx, kill_rx).await;
+                    consume(i, config, topics, bf, stats, kill_rx).await;
                 })
             })
             .collect();
 
         if stats {
-            let stats_tasks = self.start_stats()?;
-            tasks.extend(stats_tasks);
+            tasks.push(self.start_stats()?)
         };
 
         Ok(tasks)
     }
 
-    fn start_stats(&self) -> Result<Vec<task::JoinHandle<()>>, Box<dyn std::error::Error>> {
+    fn start_stats(&self) -> Result<task::JoinHandle<()>, Box<dyn std::error::Error>> {
         let stats = self.stats.clone();
-        let mut stats_rx = self.stats_tx.subscribe();
+        let interval = self.stats_interval;
         let mut kill_rx = self.kill_channel.subscribe();
         let stats_handle = task::spawn(async move {
             loop {
@@ -115,45 +112,19 @@ impl Consumer {
                             break;
                         }
                     }
-                    msg = stats_rx.recv() => {
-                        let mut stats = stats.lock().await;
-                        match msg {
-                            Ok((type_, count)) => {
-                                match type_.as_str() {
-                                    "completed" => stats.completed += count as u64,
-                                    "Error" => stats.errored += count as u64,
-                                    "None" => stats.none += count as u64,
-                                    _ => todo!(),
-                                }
-                                stats.msg_count += count as u64;
-                            }
-                            Err(_) => todo!(),
-                        }
-                    }
-                }
-            }
-        });
-        let stats = self.stats.clone();
-        let interval = self.stats_interval;
-        let mut kill_rx = self.kill_channel.subscribe();
-        let stats_log_handle = task::spawn(async move {
-            loop {
-                tokio::select! {
-                    kill = kill_rx.recv() => {
-                        if kill.is_ok() {
-                            break;
-                        }
-                    }
                     _ = tokio::time::sleep(interval) => {
-                        let mut stats = stats.lock().await;
-                        info!("Msgs/s: {}", stats.msg_count / interval.as_secs());
-                        debug!("Completed: {}, Errored: {}, None: {}", stats.completed, stats.errored, stats.none);
-                        stats.msg_count = 0;
+                        let stats = stats.lock().await;
+                        let completed = stats.completed.swap(0, std::sync::atomic::Ordering::Relaxed);
+                        let errored = stats.errored.swap(0, std::sync::atomic::Ordering::Relaxed);
+                        let none = stats.none.swap(0, std::sync::atomic::Ordering::Relaxed);
+                        let msg_count = completed + errored + none;
+                        info!("Msgs/s: {}", msg_count / interval.as_secs());
+                        debug!("Completed: {}, Errored: {}, None: {}", completed, errored, none);
                     }
                 }
             }
         });
-        Ok(vec![stats_handle, stats_log_handle])
+        Ok(stats_handle)
     }
 }
 
@@ -162,7 +133,7 @@ async fn consume(
     config: ClientConfig,
     topics: Vec<String>,
     buffer_size: usize,
-    stats_tx: tokio::sync::broadcast::Sender<(String, i32)>,
+    stats: Arc<Mutex<Stats>>,
     mut kill_channel: tokio::sync::broadcast::Receiver<bool>,
 ) {
     let mut msg_buffer = vec!["".to_string(); buffer_size];
@@ -190,21 +161,21 @@ async fn consume(
             msg = consumer.recv() => {
                 match msg {
                     Err(_) => {
-                        stats_tx.send(("Error".to_string(), 1)).unwrap();
+                        stats.lock().await.errored.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     Ok(m) => {
                         match m.payload_view::<str>() {
                             None => {
-                                stats_tx.send(("None".to_string(), 1)).unwrap();
+                                stats.lock().await.none.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             Some(Ok(m)) => {
-                                stats_tx.send(("completed".to_string(), 1)).unwrap();
+                                stats.lock().await.completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 msg_buffer[i] = m.to_string();
                                 i += 1;
                             }
                             Some(Err(e)) => {
                                 error!("deserializing message payload: {:?}", e);
-                                stats_tx.send(("Error".to_string(), 1)).unwrap();
+                                stats.lock().await.errored.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         };
                     }
@@ -239,19 +210,17 @@ async fn consume(
 }
 
 struct Stats {
-    completed: u64,
-    errored: u64,
-    none: u64,
-    msg_count: u64,
+    completed: AtomicU64,
+    errored: AtomicU64,
+    none: AtomicU64,
 }
 
 impl Stats {
     fn new() -> Self {
         Self {
-            completed: 0,
-            errored: 0,
-            none: 0,
-            msg_count: 0,
+            completed: 0.into(),
+            errored: 0.into(),
+            none: 0.into(),
         }
     }
 }

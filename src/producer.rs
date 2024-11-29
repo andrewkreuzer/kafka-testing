@@ -1,12 +1,12 @@
 use std::time::Duration;
 
-use log::{info, warn};
+use log::{info, warn, debug};
 use rdkafka::error::KafkaError;
 use tokio::task;
 
 use rdkafka::config::ClientConfig;
 use rdkafka::message::{Header, OwnedHeaders, OwnedMessage};
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::producer::{Producer, FutureProducer, FutureRecord};
 
 use trip::CircuitBreaker;
 use trip::Error as TripError;
@@ -69,7 +69,10 @@ pub async fn produce(
         tokio::select! {
             kill = kill_channel.recv() => {
                 if kill.is_ok() {
-                    info!("producer recieved signal, shutting down");
+                    debug!("producer recieved signal, shutting down");
+                    if let Err(e) = producer.flush(Duration::from_secs(10)) {
+                        warn!("flush error: {:?}", e);
+                    }
                     break;
                 }
             }
