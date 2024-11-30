@@ -5,6 +5,24 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "kt"
+path = "src/bin/kt.rs"
+
+[lib]
+name = "kafka_testing"
+path = "src/lib.rs"
+
+[workspace]
+members = [
+    "cushion",
+]
+
+[dependencies.cushion]
+path = "cushion"
+[dependencies.trip]
+git = "https://github.com/andrewkreuzer/trip.git"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = "0.3"
@@ -16,6 +34,3 @@ signal-hook-tokio = { version = "0.3.1", features = ["futures-v0_3"] }
 signal-hook = "0.3.17"
 futures = "0.3.30"
 tracing = "0.1.40"
-
-[dependencies.trip]
-git = "https://github.com/andrewkreuzer/trip.git"

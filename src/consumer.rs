@@ -1,10 +1,8 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use log::{debug, info, warn, error};
+use log::{debug, error, info, warn};
 use rdkafka::types::RDKafkaErrorCode;
-use tokio::sync::Mutex;
 use tokio::task;
 
 use rdkafka::client::ClientContext;
@@ -15,6 +13,7 @@ use rdkafka::error::KafkaResult;
 use rdkafka::message::Message;
 use rdkafka::topic_partition_list::TopicPartitionList;
 
+use cushion::Cushion;
 use trip::CircuitBreaker;
 
 struct CustomContext;
@@ -44,6 +43,12 @@ impl ConsumerContext for CustomContext {
 
 type LoggingConsumer = StreamConsumer<CustomContext>;
 
+static STATS: Stats = Stats {
+    completed: AtomicU64::new(0),
+    errored: AtomicU64::new(0),
+    none: AtomicU64::new(0),
+};
+
 pub struct Consumer {
     pub topics: Vec<String>,
     pub number_of_consumers: u8,
@@ -51,7 +56,6 @@ pub struct Consumer {
     config: ClientConfig,
     buffer_size: usize,
     kill_channel: tokio::sync::broadcast::Sender<bool>,
-    stats: Arc<Mutex<Stats>>,
     stats_interval: Duration,
 }
 
@@ -63,7 +67,6 @@ impl Consumer {
         buffer_size: usize,
         kill_channel: tokio::sync::broadcast::Sender<bool>,
     ) -> Self {
-        let stats = Arc::new(Mutex::new(Stats::new()));
         Self {
             topics,
             number_of_consumers,
@@ -71,7 +74,6 @@ impl Consumer {
             config,
             buffer_size,
             kill_channel,
-            stats,
             stats_interval: Duration::from_secs(5),
         }
     }
@@ -84,11 +86,10 @@ impl Consumer {
             .map(|i| {
                 let topics = self.topics.clone();
                 let config = self.config.clone();
-                let bf = self.buffer_size;
-                let stats = self.stats.clone();
                 let kill_rx = self.kill_channel.subscribe();
+                let buffer_size = self.buffer_size;
                 task::spawn(async move {
-                    consume(i, config, topics, bf, stats, kill_rx).await;
+                    consume(i, config, topics, buffer_size, kill_rx).await;
                 })
             })
             .collect();
@@ -101,7 +102,6 @@ impl Consumer {
     }
 
     fn start_stats(&self) -> Result<task::JoinHandle<()>, Box<dyn std::error::Error>> {
-        let stats = self.stats.clone();
         let interval = self.stats_interval;
         let mut kill_rx = self.kill_channel.subscribe();
         let stats_handle = task::spawn(async move {
@@ -113,11 +113,7 @@ impl Consumer {
                         }
                     }
                     _ = tokio::time::sleep(interval) => {
-                        let stats = stats.lock().await;
-                        let completed = stats.completed.swap(0, Ordering::Release);
-                        let errored = stats.errored.swap(0, Ordering::Release);
-                        let none = stats.none.swap(0, Ordering::Release);
-                        let msg_count = completed + errored + none;
+                        let (completed, errored, none, msg_count) = STATS.reset();
                         info!("Msgs/s: {}", msg_count / interval.as_secs());
                         debug!("Completed: {}, Errored: {}, None: {}", completed, errored, none);
                     }
@@ -133,10 +129,9 @@ async fn consume(
     config: ClientConfig,
     topics: Vec<String>,
     buffer_size: usize,
-    stats: Arc<Mutex<Stats>>,
     mut kill_channel: tokio::sync::broadcast::Receiver<bool>,
 ) {
-    let mut msg_buffer = vec!["".to_string(); buffer_size];
+    let mut send_buffer = Cushion::with_capacity(buffer_size);
     let mut circuit = CircuitBreaker::new(3, Duration::from_secs(3));
     let context = CustomContext;
     let consumer: LoggingConsumer = config
@@ -160,22 +155,23 @@ async fn consume(
             }
             msg = consumer.recv() => {
                 match msg {
-                    Err(_) => {
-                        stats.lock().await.errored.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err(e) => {
+                        error!("Error on consumer: {} while receiving: {:?}", id, e);
+                        STATS.add_errored();
                     }
                     Ok(m) => {
                         match m.payload_view::<str>() {
                             None => {
-                                stats.lock().await.none.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                STATS.add_none();
                             }
                             Some(Ok(m)) => {
-                                stats.lock().await.completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                msg_buffer[i] = m.to_string();
+                                STATS.add_completed();
+                                send_buffer.push_back(m.to_string());
                                 i += 1;
                             }
                             Some(Err(e)) => {
+                                STATS.add_errored();
                                 error!("deserializing message payload: {:?}", e);
-                                stats.lock().await.errored.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         };
                     }
@@ -183,13 +179,13 @@ async fn consume(
 
                 if i >= buffer_size {
                     i = 0;
-                    let _ = circuit.call_async(
-                        |e: &bool| !(*e),
-                        async {
+                    let _ = circuit.call_async( |e: &bool| !(*e), async {
+                        while let Some(_msg) = send_buffer.pop_front() {}
                         tokio::time::sleep(Duration::from_millis(250)).await;
+                        debug!("consumer: {} buffer cleared", id);
                         Ok(())
-                    },
-                    None).await;
+                    }, None).await;
+
                     match consumer.commit_consumer_state(CommitMode::Sync) {
                         Ok(_) => {}
                         Err(e) => {
@@ -216,11 +212,32 @@ struct Stats {
 }
 
 impl Stats {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self {
-            completed: 0.into(),
-            errored: 0.into(),
-            none: 0.into(),
+            completed: AtomicU64::new(0),
+            errored: AtomicU64::new(0),
+            none: AtomicU64::new(0),
         }
+    }
+
+    fn reset(&self) -> (u64, u64, u64, u64) {
+        let completed = self.completed.swap(0, Ordering::Release);
+        let errored = self.errored.swap(0, Ordering::Release);
+        let none = self.none.swap(0, Ordering::Release);
+        let msg_count = completed + errored + none;
+        (completed, errored, none, msg_count)
+    }
+
+    fn add_completed(&self) {
+        self.completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn add_errored(&self) {
+        self.errored.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn add_none(&self) {
+        self.none.fetch_add(1, Ordering::Relaxed);
     }
 }
