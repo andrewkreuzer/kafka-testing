@@ -15,72 +15,103 @@ use kafka_testing::{
     consumer, producer,
 };
 
-const BANNER: &str = r"
-| | ____ _ / _| | ____ _      | |_ ___  ___| |_(_)_ __   __ _ 
-| |/ / _` | |_| |/ / _` |_____| __/ _ \/ __| __| | '_ \ / _` |
-|   < (_| |  _|   < (_| |_____| ||  __/\__ \ |_| | | | | (_| |
-|_|\_\__,_|_| |_|\_\__,_|      \__\___||___/\__|_|_| |_|\__, |
-                                                        |___/ 
-";
-
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None, arg_required_else_help = true)]
+#[command(author, version, arg_required_else_help = true, verbatim_doc_comment)]
+///| | ____ _ / _| | ____ _      | |_ ___  ___| |_(_)_ __   __ _ 
+///| |/ / _` | |_| |/ / _` |_____| __/ _ \/ __| __| | '_ \ / _` |
+///|   < (_| |  _|   < (_| |_____| ||  __/\__ \ |_| | | | | (_| |
+///|_|\_\__,_|_| |_|\_\__,_|      \__\___||___/\__|_|_| |_|\__, |
+///                                                        |___/ 
+///
+/// A simple tool to test Kafka infrastructure by producing and consuming messages.
+/// It can be used to test Kafka clusters, brokers, topics, and consumers and
+///  performance of Kafka clusters and brokers (tested up to 100k msg/s.
 struct Args {
-    #[arg(short, long, default_value = config::DEFAULT_BROKER, help = "Kafka broker address")]
+    /// Kafka broker address
+    ///
+    /// The address of the Kafka broker to connect to.
+    #[arg(short, long, default_value = config::DEFAULT_BROKER)]
     broker: Option<String>,
 
-    #[arg(short, long, default_value = config::DEFAULT_GROUP, help = "Kafka consumer group")]
+    /// Kafka consumer group
+    ///
+    /// The name of the Kafka consumer group to connect as.
+    #[arg(short, long, default_value = config::DEFAULT_GROUP)]
     group: Option<String>,
 
-    #[arg(short, long, default_value = config::DEFAULT_TOPIC, help = "Kafka topic")]
+    /// Kafka topic
+    ///
+    /// The name of the Kafka topic to produce and consume messages to/from.
+    #[arg(short, long, default_value = config::DEFAULT_TOPIC)]
     topic: Vec<String>,
 
-    #[clap(short, long, default_value = "1s", help = "Delay between messages")]
+    /// Delay between messages
+    ///
+    /// The delay between producing messages.
+    #[clap(short, long, default_value = "1s")]
     delay: Option<String>,
 
-    #[clap(long, help = "Starts a producer")]
+    /// Start a producer
+    #[clap(long)]
     producer: bool,
 
-    #[clap(short, long, help = "Set producer properties file")]
+    /// Set producer properties file
+    ///
+    /// The path to a properties file containing producer configuration.
+    /// When not present, default properties are used.
+    #[clap(short, long)]
     producer_config: Option<String>,
 
-    #[arg(
-        long,
-        default_value = "false",
-        help = "Run producer for a single iteration"
-    )]
+    /// Run producer for a single iteration
+    ///
+    /// Sends <-message-count> messages and exits.
+    #[arg( long, default_value = "false")]
     oneshot: bool,
 
-    #[arg(
-        short,
-        long,
-        default_value_t = 100,
-        help = "Number of messages to produce"
-    )]
+    /// Number of messages to produce
+    ///
+    /// The number of messages to produce each iteration.
+    #[arg( short, long, default_value_t = 100)]
     message_count: i32,
 
-    #[clap(long, help = "Starts a consumer")]
+    /// Start a consumer
+    #[clap(long)]
     consumer: bool,
 
-    #[clap(long, default_value_t = 3, help = "Number of consumers to start")]
+    /// Number of consumers to start
+    ///
+    /// Should match the number of partitions in the topic (default to 3)
+    #[clap(long, default_value_t = 3)]
     consumer_count: u8,
 
-    #[clap(short, long, help = "Set consumer properties file")]
+    /// Set consumer properties file
+    ///
+    /// The path to a properties file containing consumer configuration.
+    /// Whne not present, default properties are used.
+    #[clap(short, long)]
     consumer_config: Option<String>,
 
-    #[clap(long, help = "Enable stats collection & printing")]
+    /// Enable stats collection & printing
+    ///
+    /// This will print msg/s every 5 seconds.
+    #[clap(long)]
     stats: bool,
 
-    #[clap(short, long, action = ArgAction::Count, help = "Increase output verbosity")]
+    /// Verbosity level
+    ///
+    /// Will increase the verbosity level of the output based on the number of occurrences.
+    #[clap(short, long, action = ArgAction::Count)]
     verbosity: u8,
 
-    #[clap(long, help = "prints kafka properties and exits")]
+    /// Print consumer/producer properties
+    ///
+    /// Will output the consummer and producer properties and exit.
+    #[clap(long)]
     properties: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("{BANNER}");
     let args = Args::parse();
 
     tracing_subscriber::fmt()
